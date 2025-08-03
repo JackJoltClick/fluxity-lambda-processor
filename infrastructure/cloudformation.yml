@@ -71,6 +71,7 @@ Resources:
                 "rulePriority": 2,
                 "selection": {
                   "tagStatus": "tagged",
+                  "tagPrefixList": ["v"],
                   "countType": "imageCountMoreThan",
                   "countNumber": 10
                 },

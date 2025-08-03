@@ -18,6 +18,7 @@ AWS Lambda function for processing Fluxity documents via SQS queue integration.
 - ✅ Proper error handling and DLQ integration
 - ✅ CloudFormation infrastructure as code
 - ✅ Least privilege IAM roles
+- ✅ Automatic deployment on code changes
 
 ## Deployment
 
