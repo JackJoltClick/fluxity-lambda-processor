@@ -1,0 +1,134 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Fluxity Lambda Document Processor Infrastructure (ECR, SQS, IAM only)'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [development, staging, production]
+
+Resources:
+  # Dead Letter Queue
+  DocumentProcessingDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'fluxity-document-processing-dlq-${Environment}'
+      MessageRetentionPeriod: 1209600  # 14 days
+      VisibilityTimeout: 60
+
+  # Main SQS Queue
+  DocumentProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'fluxity-document-processing-${Environment}'
+      VisibilityTimeout: 960  # 16 minutes (longer than Lambda timeout)
+      MessageRetentionPeriod: 1209600  # 14 days
+      ReceiveMessageWaitTimeSeconds: 20  # Long polling
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DocumentProcessingDLQ.Arn
+        maxReceiveCount: 3
+
+  # ECR Repository
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: fluxity-lambda-processor
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": {
+                  "type": "expire"
+                }
+              },
+              {
+                "rulePriority": 2,
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["v"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'FluxityLambdaRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SQSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: 
+                  - !GetAtt DocumentProcessingQueue.Arn
+                  - !GetAtt DocumentProcessingDLQ.Arn
+
+  # CloudWatch Log Group
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/fluxity-document-processor'
+      RetentionInDays: 14
+
+Outputs:
+  QueueUrl:
+    Description: 'URL of the SQS queue'
+    Value: !Ref DocumentProcessingQueue
+    Export:
+      Name: !Sub '${AWS::StackName}-QueueUrl'
+
+  QueueArn:
+    Description: 'ARN of the SQS queue'
+    Value: !GetAtt DocumentProcessingQueue.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-QueueArn'
+
+  DLQUrl:
+    Description: 'URL of the Dead Letter Queue'
+    Value: !Ref DocumentProcessingDLQ
+    Export:
+      Name: !Sub '${AWS::StackName}-DLQUrl'
+
+  ECRRepositoryUri:
+    Description: 'URI of the ECR repository'
+    Value: !GetAtt ECRRepository.RepositoryUri
+    Export:
+      Name: !Sub '${AWS::StackName}-ECRUri'
+
+  LambdaExecutionRoleArn:
+    Description: 'ARN of the Lambda execution role'
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaRoleArn'

@@ -56,15 +56,35 @@ jobs:
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
         echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-    - name: Update lambda function
+    - name: Create or update lambda function
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         IMAGE_TAG: ${{ github.sha }}
       run: |
-        aws lambda update-function-code \
-          --function-name $LAMBDA_FUNCTION_NAME \
-          --image-uri $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
-          --region $AWS_REGION
+        # Check if Lambda function exists
+        if aws lambda get-function --function-name $LAMBDA_FUNCTION_NAME --region $AWS_REGION 2>/dev/null; then
+          echo "Updating existing Lambda function..."
+          aws lambda update-function-code \
+            --function-name $LAMBDA_FUNCTION_NAME \
+            --image-uri $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            --region $AWS_REGION
+        else
+          echo "Creating new Lambda function..."
+          ROLE_ARN=$(aws cloudformation describe-stacks \
+            --stack-name fluxity-lambda-processor-production \
+            --region $AWS_REGION \
+            --query 'Stacks[0].Outputs[?OutputKey==`LambdaExecutionRoleArn`].OutputValue' \
+            --output text)
+          
+          aws lambda create-function \
+            --function-name $LAMBDA_FUNCTION_NAME \
+            --role $ROLE_ARN \
+            --code ImageUri=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            --package-type Image \
+            --timeout 900 \
+            --memory-size 1024 \
+            --region $AWS_REGION
+        fi
 
     - name: Wait for Lambda update to complete
       run: |
