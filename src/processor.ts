@@ -1,5 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
+import * as fs from 'fs';
+import * as path from 'path';
 
 // Initialize clients
 const supabase = createClient(
@@ -97,35 +99,139 @@ export async function processDocument(jobData: DocumentJobData): Promise<Process
     let completion;
     
     if (isPDF) {
-      // For PDFs: Use gpt-4o (supports PDF processing)
-      const base64 = buffer.toString('base64');
+      // For PDFs: Upload to OpenAI Files API first, then use with gpt-4o
+      console.log('📤 Uploading PDF to OpenAI Files API...');
       
-      completion = await openai.chat.completions.create({
-        model: "gpt-4o",
-        messages: [
-          {
-            role: "system",
-            content: "Extract invoice information from the document. Return JSON with: vendor_name, invoice_number, invoice_date, total_amount, line_items (array with description and amount)"
-          },
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: "Extract the invoice data from this PDF document"
-              },
-              {
-                type: "image_url",
-                image_url: {
-                  url: `data:application/pdf;base64,${base64}`
-                }
-              }
-            ]
-          }
-        ],
-        response_format: { type: "json_object" },
-        max_tokens: 2000
+      // Write buffer to temporary file
+      const tempFilePath = path.join('/tmp', jobData.filename);
+      fs.writeFileSync(tempFilePath, buffer);
+      
+      // Create readable stream from temp file
+      const fileStream = fs.createReadStream(tempFilePath);
+
+      const file = await openai.files.create({
+        file: fileStream,
+        purpose: 'assistants'
       });
+      
+      console.log(`📁 PDF uploaded with file ID: ${file.id}`);
+      
+      // Create assistant to process the PDF
+      const assistant = await openai.beta.assistants.create({
+        name: "Invoice Extractor",
+        instructions: `You are an invoice data extractor. Your ONLY job is to extract information from PDF documents and return EXACTLY this JSON structure with no additional text, formatting, or explanation:
+
+{
+  "accounting_fields": {
+    "invoicing_party": { "value": "vendor/company name", "confidence": 0.9 },
+    "supplier_invoice_id_by_invcg_party": { "value": "invoice number", "confidence": 0.9 },
+    "document_date": { "value": "YYYY-MM-DD or original date format", "confidence": 0.9 },
+    "posting_date": { "value": "YYYY-MM-DD or same as document_date", "confidence": 0.9 },
+    "invoice_gross_amount": { "value": number, "confidence": 0.9 },
+    "supplier_invoice_item_amount": { "value": number, "confidence": 0.9 },
+    "supplier_invoice_item_text": { "value": "line item descriptions joined with commas", "confidence": 0.9 },
+    "document_currency": { "value": "USD or detected currency", "confidence": 0.8 },
+    "supplier_invoice_transaction_type": { "value": "Standard Invoice", "confidence": 0.7 },
+    "accounting_document_type": { "value": "RE", "confidence": 0.7 },
+    "accounting_document_header_text": { "value": "vendor - invoice number", "confidence": 0.8 },
+    "debit_credit_code": { "value": "H", "confidence": 0.7 },
+    "assignment_reference": { "value": "invoice number", "confidence": 0.8 },
+    "company_code": { "value": null, "confidence": 0.5 },
+    "gl_account": { "value": null, "confidence": 0.5 },
+    "tax_code": { "value": null, "confidence": 0.5 },
+    "tax_jurisdiction": { "value": null, "confidence": 0.5 },
+    "cost_center": { "value": null, "confidence": 0.5 },
+    "profit_center": { "value": null, "confidence": 0.5 },
+    "internal_order": { "value": null, "confidence": 0.5 },
+    "wbs_element": { "value": null, "confidence": 0.5 }
+  }
+}
+
+CRITICAL: Return ONLY the JSON object above. No markdown, no code blocks, no explanations, no additional text whatsoever.`,
+        model: "gpt-4o",
+        tools: [{ type: "file_search" }],
+        tool_resources: {
+          file_search: {
+            vector_stores: [{
+              file_ids: [file.id]
+            }]
+          }
+        }
+      });
+      
+      // Create thread and run
+      const thread = await openai.beta.threads.create({
+        messages: [{
+          role: "user",
+          content: "Extract invoice data from the PDF. Return ONLY the JSON object with no formatting or additional text."
+        }]
+      });
+      
+      const run = await openai.beta.threads.runs.create(thread.id, {
+        assistant_id: assistant.id
+      });
+      
+      // Wait for completion
+      let runStatus = await openai.beta.threads.runs.retrieve(thread.id, run.id);
+      while (runStatus.status === 'in_progress' || runStatus.status === 'queued') {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        runStatus = await openai.beta.threads.runs.retrieve(thread.id, run.id);
+      }
+      
+      if (runStatus.status !== 'completed') {
+        throw new Error(`Assistant run failed with status: ${runStatus.status}`);
+      }
+      
+      // Get the response
+      const messages = await openai.beta.threads.messages.list(thread.id);
+      const lastMessage = messages.data[0];
+      
+      if (!lastMessage || !lastMessage.content[0] || lastMessage.content[0].type !== 'text') {
+        throw new Error('No valid response from assistant');
+      }
+      
+      // Parse the response, handling potential markdown formatting
+      let responseText = lastMessage.content[0].text.value;
+      console.log('🔍 Raw assistant response:', responseText);
+      
+      // Remove markdown code blocks if present
+      if (responseText.startsWith('```json')) {
+        responseText = responseText.replace(/```json\n?/, '').replace(/\n?```$/, '');
+      } else if (responseText.startsWith('```')) {
+        responseText = responseText.replace(/```\n?/, '').replace(/\n?```$/, '');
+      }
+      
+      // Try to parse JSON
+      let extractedData;
+      try {
+        extractedData = JSON.parse(responseText);
+      } catch (parseError) {
+        console.error('❌ JSON parse error, raw response:', responseText);
+        // Fallback: create a basic structure
+        extractedData = {
+          vendor_name: "Unable to extract",
+          invoice_number: "Parse error",
+          invoice_date: null,
+          total_amount: 0,
+          line_items: [],
+          error: "JSON parsing failed"
+        };
+      }
+      
+      // Cleanup
+      await openai.files.del(file.id);
+      await openai.beta.assistants.del(assistant.id);
+      
+      // Clean up temp file
+      fs.unlinkSync(tempFilePath);
+      
+      completion = {
+        choices: [{
+          message: {
+            content: JSON.stringify(extractedData)
+          }
+        }]
+      };
       
     } else if (isImage) {
       // For Images: Use vision API
@@ -181,10 +287,10 @@ export async function processDocument(jobData: DocumentJobData): Promise<Process
       .eq('id', jobData.documentId)
       .eq('user_id', jobData.userId);
     
-    // Parse extracted data
+    // Parse extracted data - OpenAI now returns the exact format we need
     const extractedData = JSON.parse(completion.choices[0].message.content || '{}');
     console.log(`✅ Extraction complete:`, extractedData);
-    
+
     // Save results and mark as complete
     const { error: updateError } = await supabase
       .from('documents')
@@ -192,6 +298,7 @@ export async function processDocument(jobData: DocumentJobData): Promise<Process
         status: 'completed',
         processing_progress: 100,
         extracted_data: extractedData,
+        extraction_method: 'openai-assistants',
         updated_at: new Date().toISOString()
       })
       .eq('id', jobData.documentId)
