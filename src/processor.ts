@@ -3,14 +3,32 @@ import OpenAI from 'openai';
 import * as fs from 'fs';
 import * as path from 'path';
 
-// Initialize clients
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY!
-);
+// Secure environment variable loading with validation
+function getRequiredEnvVar(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
+}
+
+// Validate and load environment variables
+const SUPABASE_URL = getRequiredEnvVar('SUPABASE_URL');
+const SUPABASE_SERVICE_KEY = getRequiredEnvVar('SUPABASE_SERVICE_KEY');
+const OPENAI_API_KEY = getRequiredEnvVar('OPENAI_API_KEY');
+
+// Validate URL format
+try {
+  new URL(SUPABASE_URL);
+} catch {
+  throw new Error('Invalid SUPABASE_URL format');
+}
+
+// Initialize clients with validated credentials
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!
+  apiKey: OPENAI_API_KEY
 });
 
 export interface DocumentJobData {
@@ -55,8 +73,36 @@ export async function processDocument(jobData: DocumentJobData): Promise<Process
       .eq('id', jobData.documentId)
       .eq('user_id', jobData.userId);
     
-    // Download file from Supabase
+    // Validate and download file from Supabase
     console.log(`📥 Downloading file: ${jobData.fileUrl}`);
+    
+    // Validate file URL format and domain
+    try {
+      const fileUrlObj = new URL(jobData.fileUrl);
+      
+      // Only allow Supabase storage URLs
+      const allowedDomains = [
+        SUPABASE_URL.replace('https://', '').replace('http://', ''),
+        'supabase.co',
+        'supabase.in'
+      ];
+      
+      const isAllowedDomain = allowedDomains.some(domain => 
+        fileUrlObj.hostname === domain || fileUrlObj.hostname.endsWith('.' + domain)
+      );
+      
+      if (!isAllowedDomain) {
+        throw new Error(`Unauthorized file URL domain: ${fileUrlObj.hostname}`);
+      }
+      
+      // Only allow HTTPS
+      if (fileUrlObj.protocol !== 'https:') {
+        throw new Error('Only HTTPS URLs are allowed');
+      }
+      
+    } catch (error) {
+      throw new Error(`Invalid file URL: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
     
     // Extract file path from URL
     let filePath = jobData.fileUrl;
@@ -67,7 +113,12 @@ export async function processDocument(jobData: DocumentJobData): Promise<Process
       }
     }
     
-    console.log(`📁 Using file path: ${filePath}`);
+    // Validate file path doesn't contain path traversal attempts
+    if (filePath.includes('../') || filePath.includes('..\\') || filePath.startsWith('/')) {
+      throw new Error('Invalid file path detected');
+    }
+    
+    console.log(`📁 Using validated file path: ${filePath}`);
     
     const { data: fileData, error: downloadError } = await supabase.storage
       .from('documents')
@@ -247,18 +298,43 @@ CRITICAL: Return ONLY the JSON object above. No markdown, no code blocks, no exp
               : 'image/jpeg';
       
       completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
+        model: "gpt-4o",
         messages: [
           {
             role: "system",
-            content: "Extract invoice information from the document. Return JSON with: vendor_name, invoice_number, invoice_date, total_amount, line_items (array with description and amount)"
+            content: `Extract invoice information and return EXACTLY this JSON structure:
+{
+  "accounting_fields": {
+    "invoicing_party": { "value": "vendor/company name", "confidence": 0.9 },
+    "supplier_invoice_id_by_invcg_party": { "value": "invoice number", "confidence": 0.9 },
+    "document_date": { "value": "YYYY-MM-DD or original date format", "confidence": 0.9 },
+    "posting_date": { "value": "YYYY-MM-DD or same as document_date", "confidence": 0.9 },
+    "invoice_gross_amount": { "value": number, "confidence": 0.9 },
+    "supplier_invoice_item_amount": { "value": number, "confidence": 0.9 },
+    "supplier_invoice_item_text": { "value": "line item descriptions joined with commas", "confidence": 0.9 },
+    "document_currency": { "value": "USD or detected currency", "confidence": 0.8 },
+    "supplier_invoice_transaction_type": { "value": "Standard Invoice", "confidence": 0.7 },
+    "accounting_document_type": { "value": "RE", "confidence": 0.7 },
+    "accounting_document_header_text": { "value": "vendor - invoice number", "confidence": 0.8 },
+    "debit_credit_code": { "value": "H", "confidence": 0.7 },
+    "assignment_reference": { "value": "invoice number", "confidence": 0.8 },
+    "company_code": { "value": null, "confidence": 0.5 },
+    "gl_account": { "value": null, "confidence": 0.5 },
+    "tax_code": { "value": null, "confidence": 0.5 },
+    "tax_jurisdiction": { "value": null, "confidence": 0.5 },
+    "cost_center": { "value": null, "confidence": 0.5 },
+    "profit_center": { "value": null, "confidence": 0.5 },
+    "internal_order": { "value": null, "confidence": 0.5 },
+    "wbs_element": { "value": null, "confidence": 0.5 }
+  }
+}`
           },
           {
             role: "user",
             content: [
               {
                 type: "text",
-                text: "Extract the invoice data from this image"
+                text: "Extract the invoice data from this image and return ONLY the JSON structure above with no additional text."
               },
               {
                 type: "image_url",
