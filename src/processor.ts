@@ -55,7 +55,13 @@ export interface ProcessingResult {
 }
 
 // Helper function to run OpenAI extraction
-async function runOpenAIExtraction(jobData: DocumentJobData, buffer: Buffer, isPDF: boolean, isImage: boolean): Promise<any> {
+async function runOpenAIExtraction(
+  jobData: DocumentJobData, 
+  buffer: Buffer, 
+  isPDF: boolean, 
+  isImage: boolean, 
+  textractData?: any
+): Promise<any> {
   let completion;
   
   if (isPDF) {
@@ -76,26 +82,24 @@ async function runOpenAIExtraction(jobData: DocumentJobData, buffer: Buffer, isP
     
     console.log(`📁 PDF uploaded with file ID: ${file.id}`);
     
-    // Create assistant to process the PDF
-    const assistant = await openai.beta.assistants.create({
-      name: "Invoice Extractor",
-      instructions: `You are an invoice data extractor. Your ONLY job is to extract information from PDF documents and return EXACTLY this JSON structure with no additional text, formatting, or explanation:
+    // Build enhanced instructions with Textract context
+    let instructions = `You are an expert invoice data extractor. Extract information from PDF documents and return EXACTLY this JSON structure:
 
 {
   "accounting_fields": {
     "invoicing_party": { "value": "vendor/company name", "confidence": 0.9 },
     "supplier_invoice_id_by_invcg_party": { "value": "invoice number", "confidence": 0.9 },
-    "document_date": { "value": "YYYY-MM-DD or original date format", "confidence": 0.9 },
-    "posting_date": { "value": "YYYY-MM-DD or same as document_date", "confidence": 0.9 },
+    "document_date": { "value": "YYYY-MM-DD format", "confidence": 0.9 },
+    "posting_date": { "value": "YYYY-MM-DD format", "confidence": 0.9 },
     "invoice_gross_amount": { "value": number, "confidence": 0.9 },
     "supplier_invoice_item_amount": { "value": number, "confidence": 0.9 },
-    "supplier_invoice_item_text": { "value": "line item descriptions joined with commas", "confidence": 0.9 },
-    "document_currency": { "value": "USD or detected currency", "confidence": 0.8 },
+    "supplier_invoice_item_text": { "value": "line item descriptions", "confidence": 0.9 },
+    "document_currency": { "value": "USD/EUR/etc", "confidence": 0.8 },
     "supplier_invoice_transaction_type": { "value": "Standard Invoice", "confidence": 0.7 },
     "accounting_document_type": { "value": "RE", "confidence": 0.7 },
-    "accounting_document_header_text": { "value": "vendor - invoice number", "confidence": 0.8 },
+    "accounting_document_header_text": { "value": "vendor - invoice", "confidence": 0.8 },
     "debit_credit_code": { "value": "H", "confidence": 0.7 },
-    "assignment_reference": { "value": "invoice number", "confidence": 0.8 },
+    "assignment_reference": { "value": "invoice reference", "confidence": 0.8 },
     "company_code": { "value": null, "confidence": 0.5 },
     "gl_account": { "value": null, "confidence": 0.5 },
     "tax_code": { "value": null, "confidence": 0.5 },
@@ -105,9 +109,44 @@ async function runOpenAIExtraction(jobData: DocumentJobData, buffer: Buffer, isP
     "internal_order": { "value": null, "confidence": 0.5 },
     "wbs_element": { "value": null, "confidence": 0.5 }
   }
-}
+}`;
 
-CRITICAL: Return ONLY the JSON object above. No markdown, no code blocks, no explanations, no additional text whatsoever.`,
+    // Add Textract context if available
+    if (textractData) {
+      instructions += `
+
+TEXTRACT STRUCTURED DATA AVAILABLE:
+Key-Value Pairs: ${JSON.stringify(textractData.keyValuePairs, null, 2)}
+Line Items: ${JSON.stringify(textractData.lineItems, null, 2)}
+Tables: ${textractData.tables?.length || 0} tables detected
+
+Use this structured data to enhance accuracy. Cross-reference values and prefer structured data over OCR text when available.`;
+    }
+
+    instructions += `
+
+FIELD MAPPING RULES:
+- invoicing_party: Look for vendor/supplier name, company name
+- supplier_invoice_id_by_invcg_party: Invoice number, invoice ID, document number
+- document_date: Invoice date, document date, issue date
+- posting_date: Same as document_date unless specified differently
+- invoice_gross_amount: Total amount, grand total, amount due (as number)
+- supplier_invoice_item_amount: Line item total, subtotal (as number)
+- supplier_invoice_item_text: Combine all line item descriptions with commas
+- document_currency: Currency symbol or code (USD, EUR, etc)
+
+EXAMPLES:
+- If you see "ABC Company" → invoicing_party: "ABC Company"
+- If you see "INV-12345" → supplier_invoice_id_by_invcg_party: "INV-12345"
+- If you see "$1,234.56" → invoice_gross_amount: 1234.56
+- If you see "01/15/2024" → document_date: "2024-01-15"
+
+CRITICAL: Return ONLY the JSON object. No markdown, no code blocks, no explanations.`;
+
+    // Create assistant to process the PDF
+    const assistant = await openai.beta.assistants.create({
+      name: "Invoice Extractor",
+      instructions,
       model: "gpt-4o",
       tools: [{ type: "file_search" }],
       tool_resources: {
@@ -123,7 +162,9 @@ CRITICAL: Return ONLY the JSON object above. No markdown, no code blocks, no exp
     const thread = await openai.beta.threads.create({
       messages: [{
         role: "user",
-        content: "Extract invoice data from the PDF. Return ONLY the JSON object with no formatting or additional text."
+        content: textractData 
+          ? "Extract invoice data from the PDF using the Textract structured data provided in your instructions. Cross-reference and return ONLY the JSON object with no formatting or additional text."
+          : "Extract invoice data from the PDF. Return ONLY the JSON object with no formatting or additional text."
       }]
     });
     
@@ -206,27 +247,23 @@ CRITICAL: Return ONLY the JSON object above. No markdown, no code blocks, no exp
             ? 'image/gif'
             : 'image/jpeg';
     
-    completion = await openai.chat.completions.create({
-      model: "gpt-4o",
-      messages: [
-        {
-          role: "system",
-          content: `Extract invoice information and return EXACTLY this JSON structure:
+    // Build enhanced system message with Textract context
+    let systemContent = `Extract invoice information and return EXACTLY this JSON structure:
 {
   "accounting_fields": {
     "invoicing_party": { "value": "vendor/company name", "confidence": 0.9 },
     "supplier_invoice_id_by_invcg_party": { "value": "invoice number", "confidence": 0.9 },
-    "document_date": { "value": "YYYY-MM-DD or original date format", "confidence": 0.9 },
-    "posting_date": { "value": "YYYY-MM-DD or same as document_date", "confidence": 0.9 },
+    "document_date": { "value": "YYYY-MM-DD format", "confidence": 0.9 },
+    "posting_date": { "value": "YYYY-MM-DD format", "confidence": 0.9 },
     "invoice_gross_amount": { "value": number, "confidence": 0.9 },
     "supplier_invoice_item_amount": { "value": number, "confidence": 0.9 },
-    "supplier_invoice_item_text": { "value": "line item descriptions joined with commas", "confidence": 0.9 },
-    "document_currency": { "value": "USD or detected currency", "confidence": 0.8 },
+    "supplier_invoice_item_text": { "value": "line item descriptions", "confidence": 0.9 },
+    "document_currency": { "value": "USD/EUR/etc", "confidence": 0.8 },
     "supplier_invoice_transaction_type": { "value": "Standard Invoice", "confidence": 0.7 },
     "accounting_document_type": { "value": "RE", "confidence": 0.7 },
-    "accounting_document_header_text": { "value": "vendor - invoice number", "confidence": 0.8 },
+    "accounting_document_header_text": { "value": "vendor - invoice", "confidence": 0.8 },
     "debit_credit_code": { "value": "H", "confidence": 0.7 },
-    "assignment_reference": { "value": "invoice number", "confidence": 0.8 },
+    "assignment_reference": { "value": "invoice reference", "confidence": 0.8 },
     "company_code": { "value": null, "confidence": 0.5 },
     "gl_account": { "value": null, "confidence": 0.5 },
     "tax_code": { "value": null, "confidence": 0.5 },
@@ -236,14 +273,53 @@ CRITICAL: Return ONLY the JSON object above. No markdown, no code blocks, no exp
     "internal_order": { "value": null, "confidence": 0.5 },
     "wbs_element": { "value": null, "confidence": 0.5 }
   }
-}`
+}`;
+
+    // Add Textract context if available
+    if (textractData) {
+      systemContent += `
+
+TEXTRACT STRUCTURED DATA AVAILABLE:
+Key-Value Pairs: ${JSON.stringify(textractData.keyValuePairs, null, 2)}
+Line Items: ${JSON.stringify(textractData.lineItems, null, 2)}
+Tables: ${textractData.tables?.length || 0} tables detected
+
+Use this structured data to enhance accuracy. Cross-reference values and prefer structured data over OCR text when available.`;
+    }
+
+    systemContent += `
+
+FIELD MAPPING RULES:
+- invoicing_party: Look for vendor/supplier name, company name
+- supplier_invoice_id_by_invcg_party: Invoice number, invoice ID, document number
+- document_date: Invoice date, document date, issue date (convert to YYYY-MM-DD)
+- posting_date: Same as document_date unless specified differently
+- invoice_gross_amount: Total amount, grand total, amount due (as number)
+- supplier_invoice_item_amount: Line item total, subtotal (as number)
+- supplier_invoice_item_text: Combine all line item descriptions with commas
+- document_currency: Currency symbol or code (USD, EUR, etc)
+
+EXAMPLES:
+- "ABC Company" → invoicing_party: "ABC Company"
+- "INV-12345" → supplier_invoice_id_by_invcg_party: "INV-12345"
+- "$1,234.56" → invoice_gross_amount: 1234.56
+- "01/15/2024" → document_date: "2024-01-15"`;
+
+    completion = await openai.chat.completions.create({
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "system",
+          content: systemContent
         },
         {
           role: "user",
           content: [
             {
               type: "text",
-              text: "Extract the invoice data from this image and return ONLY the JSON structure above with no additional text."
+              text: textractData 
+                ? "Extract the invoice data from this image using the Textract structured data provided above. Cross-reference and return ONLY the JSON structure with no additional text."
+                : "Extract the invoice data from this image and return ONLY the JSON structure above with no additional text."
             },
             {
               type: "image_url",
@@ -380,15 +456,20 @@ export async function processDocument(jobData: DocumentJobData): Promise<Process
     const textractService = new TextractService();
     const fusionEngine = new FusionEngine();
     
-    // Run both extractions in parallel for maximum speed
-    console.log('⚡ Running parallel extractions...');
+    // Pass 1: Run both extractions in parallel for maximum speed  
+    console.log('⚡ Pass 1: Running parallel extractions...');
     const [textractResult, openaiResult] = await Promise.all([
       textractService.extractFromUrl(jobData.fileUrl),
-      runOpenAIExtraction(jobData, buffer, isPDF, isImage)
+      runOpenAIExtraction(jobData, buffer, isPDF, isImage, null) // No Textract data yet
     ]);
     
+    // Pass 2: Enhanced OpenAI extraction using Textract's structured data
+    console.log('🔍 Pass 2: Enhanced OpenAI extraction with Textract context...');
+    const enhancedOpenaiResult = await runOpenAIExtraction(jobData, buffer, isPDF, isImage, textractResult);
+    
     console.log('🔄 Fusing results for maximum accuracy...');
-    const hybridResult = await fusionEngine.combine(textractResult, openaiResult);
+    // Use the enhanced OpenAI result (Pass 2) instead of the first pass
+    const hybridResult = await fusionEngine.combine(textractResult, enhancedOpenaiResult);
     
     // Update progress
     await supabase

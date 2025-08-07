@@ -206,12 +206,14 @@ export class FusionEngine {
     // Extract business intelligence from OpenAI result
     if (openaiResult.extracted_data) {
       return {
+        // Pass through the accounting fields directly
+        accounting_fields: openaiResult.extracted_data.accounting_fields || {},
         businessRules: openaiResult.extracted_data.business_rules || {},
         interpretations: openaiResult.extracted_data.interpretations || {},
         normalizations: openaiResult.extracted_data.normalizations || {}
       }
     }
-    return {}
+    return { accounting_fields: {} }
   }
 
   private normalizeData(textractResult: TextractResult, openaiResult: OpenAIResult): any {
