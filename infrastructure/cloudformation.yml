@@ -109,6 +109,15 @@ Resources:
                 Resource: 
                   - !GetAtt DocumentProcessingQueue.Arn
                   - !GetAtt DocumentProcessingDLQ.Arn
+        - PolicyName: TextractAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - textract:AnalyzeDocument
+                  - textract:DetectDocumentText
+                Resource: '*'
 
   # Lambda Function
   DocumentProcessorFunction:
@@ -127,6 +136,7 @@ Resources:
           SUPABASE_SERVICE_KEY: !Ref SupabaseServiceKey
           OPENAI_API_KEY: !Ref OpenAIApiKey
           NODE_ENV: !Ref Environment
+          AWS_REGION: !Ref 'AWS::Region'
 
   # Lambda SQS Event Source Mapping
   SQSEventSourceMapping:
