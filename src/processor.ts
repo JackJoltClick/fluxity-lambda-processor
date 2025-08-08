@@ -493,6 +493,9 @@ export async function processDocument(jobData: DocumentJobData): Promise<Process
         lineItems: hybridResult.lineItems
       },
       
+      // Direct field mapping results
+      field_mappings: hybridResult.fieldMappings,
+      
       // Cross-validation info
       cross_validation: hybridResult.crossValidation,
       

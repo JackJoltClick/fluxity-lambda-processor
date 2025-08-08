@@ -1,4 +1,5 @@
 import { TextractResult } from './textract.service'
+import { applyFieldMappings } from '../config/field-mappings'
 
 export interface OpenAIResult {
   text: string
@@ -28,6 +29,18 @@ export interface HybridExtractionResult {
   businessLogic?: any
   normalizedData?: any
   
+  // Direct field mapping results
+  fieldMappings?: {
+    mapped: Record<string, any>
+    unmapped: Record<string, any>
+    mappingDetails: Array<{
+      sourceKey: string
+      targetField: string
+      value: any
+      confidence: number
+    }>
+  }
+  
   // Cross-validation results
   crossValidation: {
     agreementScore: number // 0-1, how much both services agree
@@ -37,7 +50,7 @@ export interface HybridExtractionResult {
       openaiValue: any
       finalValue: any
       confidence: number
-      source: 'textract' | 'openai' | 'consensus'
+      source: 'textract' | 'openai' | 'consensus' | 'direct-mapping'
     }>
   }
   
@@ -61,8 +74,13 @@ export class FusionEngine {
   async combine(textractResult: TextractResult, openaiResult: OpenAIResult): Promise<HybridExtractionResult> {
     console.log('🔄 Fusion: Starting hybrid analysis...')
     
+    // Apply direct field mappings to Textract's key-value pairs
+    const fieldMappings = applyFieldMappings(textractResult.keyValuePairs)
+    console.log(`📋 Direct mapping: ${Object.keys(fieldMappings.mapped).filter(k => fieldMappings.mapped[k] !== null).length} fields mapped`)
+    console.log(`❓ Unmapped fields: ${Object.keys(fieldMappings.unmapped).length}`)
+    
     // Cross-validate critical fields
-    const crossValidation = this.performCrossValidation(textractResult, openaiResult)
+    const crossValidation = this.performCrossValidation(textractResult, openaiResult, fieldMappings)
     
     // Calculate hybrid confidence score
     const hybridConfidence = this.calculateHybridConfidence(
@@ -76,6 +94,15 @@ export class FusionEngine {
     
     // Extract business logic from OpenAI result
     const businessLogic = this.extractBusinessLogic(openaiResult)
+    
+    // Merge direct mappings with OpenAI's accounting fields
+    const mergedAccountingFields = this.mergeAccountingFields(
+      fieldMappings.mapped,
+      businessLogic.accounting_fields || {}
+    )
+    
+    // Update business logic with merged fields
+    businessLogic.accounting_fields = mergedAccountingFields
     
     // Calculate costs
     const textractCost = this.calculateTextractCost(textractResult)
@@ -94,6 +121,9 @@ export class FusionEngine {
       // Business intelligence (OpenAI's strength)
       businessLogic,
       normalizedData: this.normalizeData(textractResult, openaiResult),
+      
+      // Direct field mapping results
+      fieldMappings,
       
       // Cross-validation
       crossValidation,
@@ -121,7 +151,45 @@ export class FusionEngine {
     return result
   }
 
-  private performCrossValidation(textractResult: TextractResult, openaiResult: OpenAIResult): HybridExtractionResult['crossValidation'] {
+  private mergeAccountingFields(directMapped: Record<string, any>, openaiFields: Record<string, any>): Record<string, any> {
+    const merged: Record<string, any> = {};
+    
+    // Get all unique field names
+    const allFields = new Set([
+      ...Object.keys(directMapped),
+      ...Object.keys(openaiFields)
+    ]);
+    
+    allFields.forEach(field => {
+      const directValue = directMapped[field];
+      const openaiValue = openaiFields[field]?.value || openaiFields[field];
+      
+      // Prefer direct mapping if available, otherwise use OpenAI
+      if (directValue !== null && directValue !== undefined) {
+        merged[field] = {
+          value: directValue,
+          confidence: 0.95,
+          source: 'direct-mapping'
+        };
+      } else if (openaiValue !== null && openaiValue !== undefined) {
+        merged[field] = {
+          value: openaiValue,
+          confidence: openaiFields[field]?.confidence || 0.8,
+          source: 'openai'
+        };
+      } else {
+        merged[field] = {
+          value: null,
+          confidence: 0,
+          source: 'none'
+        };
+      }
+    });
+    
+    return merged;
+  }
+
+  private performCrossValidation(textractResult: TextractResult, openaiResult: OpenAIResult, fieldMappings?: any): HybridExtractionResult['crossValidation'] {
     const validatedFields: Record<string, any> = {}
     const conflictingFields: string[] = []
     
