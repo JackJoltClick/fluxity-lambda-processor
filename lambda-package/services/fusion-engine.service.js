@@ -64,7 +64,18 @@ class FusionEngine {
         ]);
         allFields.forEach(field => {
             const directValue = directMapped[field];
-            const openaiValue = openaiFields[field]?.value || openaiFields[field];
+            const openaiField = openaiFields[field];
+            let openaiValue = null;
+            let openaiConfidence = 0.8;
+            if (openaiField) {
+                if (typeof openaiField === 'object' && 'value' in openaiField) {
+                    openaiValue = openaiField.value;
+                    openaiConfidence = openaiField.confidence || 0.8;
+                }
+                else {
+                    openaiValue = openaiField;
+                }
+            }
             if (directValue !== null && directValue !== undefined) {
                 merged[field] = {
                     value: directValue,
@@ -75,7 +86,7 @@ class FusionEngine {
             else if (openaiValue !== null && openaiValue !== undefined) {
                 merged[field] = {
                     value: openaiValue,
-                    confidence: openaiFields[field]?.confidence || 0.8,
+                    confidence: openaiConfidence,
                     source: 'openai'
                 };
             }
@@ -155,14 +166,21 @@ class FusionEngine {
         return textractText || openaiText;
     }
     extractBusinessLogic(openaiResult) {
+        console.log('🔍 Fusion: Extracting business logic from OpenAI result:', {
+            hasExtractedData: !!openaiResult.extracted_data,
+            extractedDataType: typeof openaiResult.extracted_data,
+            extractedDataKeys: openaiResult.extracted_data ? Object.keys(openaiResult.extracted_data) : [],
+            extractedDataSample: openaiResult.extracted_data
+        });
         if (openaiResult.extracted_data) {
             return {
-                accounting_fields: openaiResult.extracted_data.accounting_fields || {},
+                accounting_fields: openaiResult.extracted_data || {},
                 businessRules: openaiResult.extracted_data.business_rules || {},
                 interpretations: openaiResult.extracted_data.interpretations || {},
                 normalizations: openaiResult.extracted_data.normalizations || {}
             };
         }
+        console.log('⚠️ Fusion: No extracted_data found in OpenAI result, returning empty business logic');
         return { accounting_fields: {} };
     }
     normalizeData(textractResult, openaiResult) {

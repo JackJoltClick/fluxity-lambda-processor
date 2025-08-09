@@ -493,6 +493,16 @@ async function processDocument(jobData) {
         const textractResult = await textractService.extractFromUrl(jobData.fileUrl);
         console.log('🔍 Pass 2: Running OpenAI with Textract data for schema mapping...');
         const openaiResult = await runOpenAIExtraction(jobData, buffer, isPDF, isImage, textractResult);
+        console.log('🔍 OpenAI Result Debug:', {
+            hasResult: !!openaiResult,
+            resultKeys: openaiResult ? Object.keys(openaiResult) : [],
+            hasExtractedData: !!openaiResult?.extracted_data,
+            extractedDataType: typeof openaiResult?.extracted_data,
+            extractedDataKeys: openaiResult?.extracted_data ? Object.keys(openaiResult.extracted_data) : [],
+            extractedDataSample: openaiResult?.extracted_data,
+            confidence: openaiResult?.confidence,
+            extractionMethod: openaiResult?.extraction_method
+        });
         console.log('🔄 Fusing results for maximum accuracy...');
         const hybridResult = await fusionEngine.combine(textractResult, openaiResult);
         await supabase
