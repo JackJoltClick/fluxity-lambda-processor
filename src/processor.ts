@@ -54,6 +54,121 @@ export interface ProcessingResult {
   };
 }
 
+// Helper function to map Textract data using OpenAI (text-only, no document upload)
+async function runTextOnlyMapping(textractData: any): Promise<any> {
+  const startTime = Date.now()
+  
+  // Build the mapping prompt with Textract data
+  const prompt = `You are an expert at mapping extracted invoice data to a standardized accounting schema.
+
+I have extracted the following raw data from an invoice using OCR:
+
+**KEY-VALUE PAIRS:**
+${JSON.stringify(textractData.keyValuePairs, null, 2)}
+
+**LINE ITEMS:**
+${JSON.stringify(textractData.lineItems || [], null, 2)}
+
+**TABLE DATA:**
+${textractData.tables?.length ? JSON.stringify(textractData.tables, null, 2) : 'No table data'}
+
+Your task is to intelligently map this raw extracted data to the following standardized accounting schema. Use your understanding of invoice structures and business context to make the best mappings.
+
+Return EXACTLY this JSON structure with mapped values and confidence scores (0.0 to 1.0):
+
+{
+  "accounting_fields": {
+    "invoicing_party": { "value": "vendor/company name", "confidence": 0.9 },
+    "supplier_invoice_id_by_invcg_party": { "value": "invoice number", "confidence": 0.9 },
+    "document_date": { "value": "YYYY-MM-DD format", "confidence": 0.9 },
+    "posting_date": { "value": "YYYY-MM-DD format", "confidence": 0.9 },
+    "invoice_gross_amount": { "value": number, "confidence": 0.9 },
+    "supplier_invoice_item_amount": { "value": number, "confidence": 0.9 },
+    "supplier_invoice_item_text": { "value": "line item descriptions", "confidence": 0.9 },
+    "document_currency": { "value": "USD/EUR/etc", "confidence": 0.8 },
+    "supplier_invoice_transaction_type": { "value": "Standard Invoice", "confidence": 0.7 },
+    "accounting_document_type": { "value": "RE", "confidence": 0.7 },
+    "accounting_document_header_text": { "value": "vendor - invoice", "confidence": 0.8 },
+    "debit_credit_code": { "value": "H", "confidence": 0.7 },
+    "assignment_reference": { "value": "invoice reference", "confidence": 0.8 },
+    "company_code": { "value": null, "confidence": 0.5 },
+    "gl_account": { "value": null, "confidence": 0.5 },
+    "tax_code": { "value": null, "confidence": 0.5 },
+    "tax_jurisdiction": { "value": null, "confidence": 0.5 },
+    "cost_center": { "value": null, "confidence": 0.5 },
+    "profit_center": { "value": null, "confidence": 0.5 },
+    "internal_order": { "value": null, "confidence": 0.5 },
+    "wbs_element": { "value": null, "confidence": 0.5 }
+  }
+}
+
+MAPPING GUIDELINES:
+- Look for patterns like "Total", "Amount Due" → invoice_gross_amount
+- Look for "Date", "Invoice Date" → document_date  
+- Look for vendor/company names → invoicing_party
+- Look for invoice numbers, PO numbers → supplier_invoice_id_by_invcg_party
+- Combine line items into supplier_invoice_item_text
+- Convert dates to YYYY-MM-DD format
+- Use confidence scores: 0.9+ for exact matches, 0.7-0.9 for good matches, 0.5-0.7 for uncertain matches
+- Set null values with confidence 0.5 for fields you cannot determine
+
+Return only the JSON, no other text.`
+
+  try {
+    console.log('🤖 OpenAI: Sending Textract data for schema mapping...')
+    
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini', // Cheaper model for text-only processing
+      messages: [
+        {
+          role: 'system',
+          content: 'You are an expert at mapping extracted invoice data to standardized accounting schemas. Always return valid JSON.'
+        },
+        {
+          role: 'user', 
+          content: prompt
+        }
+      ],
+      temperature: 0.1, // Low temperature for consistent mapping
+      max_tokens: 2000
+    })
+
+    const responseContent = completion.choices[0].message.content?.trim()
+    
+    if (!responseContent) {
+      throw new Error('Empty response from OpenAI')
+    }
+
+    console.log('🔍 OpenAI mapping response:', responseContent)
+
+    // Parse the JSON response
+    let parsedResult: any
+    try {
+      parsedResult = JSON.parse(responseContent)
+    } catch (parseError) {
+      console.error('❌ Failed to parse OpenAI response as JSON:', parseError)
+      throw new Error(`Invalid JSON response: ${responseContent}`)
+    }
+
+    const processingTime = Date.now() - startTime
+    const cost = (completion.usage?.total_tokens || 0) * 0.000002 // Rough estimate for gpt-4o-mini
+
+    console.log(`✅ OpenAI mapping complete in ${processingTime}ms, cost ~$${cost.toFixed(4)}`)
+
+    return {
+      text: JSON.stringify(parsedResult.accounting_fields),
+      confidence: 0.9, // High confidence for AI mapping
+      extraction_method: 'hybrid-textract-openai',
+      extracted_data: parsedResult.accounting_fields,
+      total_cost: cost
+    }
+
+  } catch (error) {
+    console.error('❌ OpenAI mapping failed:', error)
+    throw error
+  }
+}
+
 // Helper function to run OpenAI extraction
 async function runOpenAIExtraction(
   jobData: DocumentJobData, 
@@ -63,6 +178,22 @@ async function runOpenAIExtraction(
   textractData?: any
 ): Promise<any> {
   let completion;
+  
+  // Debug what we actually received
+  console.log('🔍 OpenAI: Checking textractData:', {
+    hasTextractData: !!textractData,
+    keyValuePairsKeys: textractData ? Object.keys(textractData.keyValuePairs || {}).length : 0,
+    textractDataKeys: textractData ? Object.keys(textractData) : []
+  })
+  
+  // NEW APPROACH: If we have Textract data, use it instead of re-analyzing the document
+  if (textractData && Object.keys(textractData.keyValuePairs || {}).length > 0) {
+    console.log('🎯 OpenAI: Processing Textract extracted data (hybrid mode)')
+    return await runTextOnlyMapping(textractData)
+  }
+  
+  // FALLBACK: If no Textract data, analyze document directly
+  console.log('📄 OpenAI: No Textract data available, analyzing document directly')
   
   if (isPDF) {
     // For PDFs: Upload to OpenAI Files API first, then use with gpt-4o
@@ -456,20 +587,27 @@ export async function processDocument(jobData: DocumentJobData): Promise<Process
     const textractService = new TextractService();
     const fusionEngine = new FusionEngine();
     
-    // Pass 1: Run both extractions in parallel for maximum speed  
-    console.log('⚡ Pass 1: Running parallel extractions...');
-    const [textractResult, openaiResult] = await Promise.all([
-      textractService.extractFromUrl(jobData.fileUrl),
-      runOpenAIExtraction(jobData, buffer, isPDF, isImage, null) // No Textract data yet
-    ]);
+    // Pass 1: Run Textract extraction first
+    console.log('⚡ Pass 1: Running Textract extraction...');
+    const textractResult = await textractService.extractFromUrl(jobData.fileUrl);
     
-    // Pass 2: Enhanced OpenAI extraction using Textract's structured data
-    console.log('🔍 Pass 2: Enhanced OpenAI extraction with Textract context...');
-    const enhancedOpenaiResult = await runOpenAIExtraction(jobData, buffer, isPDF, isImage, textractResult);
+    // Pass 2: Now run OpenAI with Textract data for intelligent mapping
+    console.log('🔍 Pass 2: Running OpenAI with Textract data for schema mapping...');
+    const openaiResult = await runOpenAIExtraction(jobData, buffer, isPDF, isImage, textractResult);
+    
+    console.log('🔍 OpenAI Result Debug:', {
+      hasResult: !!openaiResult,
+      resultKeys: openaiResult ? Object.keys(openaiResult) : [],
+      hasExtractedData: !!openaiResult?.extracted_data,
+      extractedDataType: typeof openaiResult?.extracted_data,
+      extractedDataKeys: openaiResult?.extracted_data ? Object.keys(openaiResult.extracted_data) : [],
+      extractedDataSample: openaiResult?.extracted_data,
+      confidence: openaiResult?.confidence,
+      extractionMethod: openaiResult?.extraction_method
+    })
     
     console.log('🔄 Fusing results for maximum accuracy...');
-    // Use the enhanced OpenAI result (Pass 2) instead of the first pass
-    const hybridResult = await fusionEngine.combine(textractResult, enhancedOpenaiResult);
+    const hybridResult = await fusionEngine.combine(textractResult, openaiResult);
     
     // Update progress
     await supabase
@@ -510,6 +648,12 @@ export async function processDocument(jobData: DocumentJobData): Promise<Process
     console.log(`   🤝 Agreement score: ${(hybridResult.crossValidation.agreementScore * 100).toFixed(1)}%`);
     console.log(`   💰 Total cost: $${hybridResult.total_cost.toFixed(4)}`);
 
+    // Extract individual field values from the hybrid result's accounting fields
+    // The accounting_fields are in the extractedData we just built above
+    const accountingFields = extractedData.accounting_fields || {};
+    
+    console.log('🔍 Lambda: Extracting field values for database from:', Object.keys(accountingFields));
+    
     // Save results and mark as complete
     const { error: updateError } = await supabase
       .from('documents')
@@ -523,6 +667,35 @@ export async function processDocument(jobData: DocumentJobData): Promise<Process
         textract_confidence: hybridResult.textract_confidence,
         openai_confidence: hybridResult.openai_confidence,
         cross_validation_score: hybridResult.crossValidation.agreementScore,
+        
+        // Extract individual field values from accounting_fields
+        company_code: accountingFields.company_code?.value || null,
+        supplier_invoice_transaction_type: accountingFields.supplier_invoice_transaction_type?.value || null,
+        invoicing_party: accountingFields.invoicing_party?.value || null,
+        supplier_invoice_id_by_invcg_party: accountingFields.supplier_invoice_id_by_invcg_party?.value || null,
+        document_date: accountingFields.document_date?.value || null,
+        posting_date: accountingFields.posting_date?.value || null,
+        accounting_document_type: accountingFields.accounting_document_type?.value || null,
+        accounting_document_header_text: accountingFields.accounting_document_header_text?.value || null,
+        document_currency: accountingFields.document_currency?.value || null,
+        invoice_gross_amount: accountingFields.invoice_gross_amount?.value || null,
+        gl_account: accountingFields.gl_account?.value || null,
+        supplier_invoice_item_text: accountingFields.supplier_invoice_item_text?.value || null,
+        debit_credit_code: accountingFields.debit_credit_code?.value || null,
+        supplier_invoice_item_amount: accountingFields.supplier_invoice_item_amount?.value || null,
+        tax_code: accountingFields.tax_code?.value || null,
+        tax_jurisdiction: accountingFields.tax_jurisdiction?.value || null,
+        assignment_reference: accountingFields.assignment_reference?.value || null,
+        cost_center: accountingFields.cost_center?.value || null,
+        profit_center: accountingFields.profit_center?.value || null,
+        internal_order: accountingFields.internal_order?.value || null,
+        wbs_element: accountingFields.wbs_element?.value || null,
+        
+        // Set mapping confidence and accounting status
+        mapping_confidence: hybridResult.confidence,
+        accounting_status: hybridResult.confidence >= 0.8 ? 'ready_for_export' : 'needs_mapping',
+        requires_review: hybridResult.confidence < 0.7,
+        
         updated_at: new Date().toISOString()
       })
       .eq('id', jobData.documentId)

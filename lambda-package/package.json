@@ -1,0 +1,36 @@
+{
+  "name": "fluxity-lambda-processor",
+  "version": "1.0.0",
+  "description": "AWS Lambda function for processing Fluxity documents via SQS",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist/",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@aws-sdk/client-textract": "^3.645.0",
+    "@supabase/supabase-js": "^2.53.0",
+    "form-data": "^4.0.4",
+    "openai": "^4.104.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "@types/jest": "^29.5.12",
+    "@types/node": "^20.12.12",
+    "jest": "^29.7.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  },
+  "keywords": [
+    "aws",
+    "lambda",
+    "sqs",
+    "document-processing",
+    "fluxity"
+  ],
+  "author": "Fluxity Team",
+  "license": "MIT"
+}

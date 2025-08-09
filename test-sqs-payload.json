@@ -1,0 +1,8 @@
+{
+  "Records": [
+    {
+      "messageId": "test-message-123",
+      "body": "{\"documentId\":\"test-doc-123\",\"userId\":\"test-user-456\",\"fileUrl\":\"https://example.com/test.pdf\",\"filename\":\"test.pdf\"}"
+    }
+  ]
+}

@@ -39,6 +39,14 @@ export interface HybridExtractionResult {
       value: any
       confidence: number
     }>
+    mappingTrail?: Array<{
+      sourceKey: string
+      sourceValue: any
+      targetField: string
+      mappedValue: any
+      confidence: number
+      method: string
+    }>
   }
   
   // Cross-validation results
@@ -73,11 +81,23 @@ export class FusionEngine {
   
   async combine(textractResult: TextractResult, openaiResult: OpenAIResult): Promise<HybridExtractionResult> {
     console.log('🔄 Fusion: Starting hybrid analysis...')
+    console.log('🔍 Fusion: Textract key-value pairs:', Object.keys(textractResult.keyValuePairs))
     
     // Apply direct field mappings to Textract's key-value pairs
     const fieldMappings = applyFieldMappings(textractResult.keyValuePairs)
     console.log(`📋 Direct mapping: ${Object.keys(fieldMappings.mapped).filter(k => fieldMappings.mapped[k] !== null).length} fields mapped`)
     console.log(`❓ Unmapped fields: ${Object.keys(fieldMappings.unmapped).length}`)
+    console.log('📋 Mapped fields:', Object.entries(fieldMappings.mapped).filter(([k,v]) => v !== null).map(([k,v]) => `${k}=${v}`))
+    
+    // NEW: Create a mapping trail for the UI to display
+    const mappingTrail = fieldMappings.mappingDetails.map(detail => ({
+      sourceKey: detail.sourceKey,
+      sourceValue: textractResult.keyValuePairs[detail.sourceKey],
+      targetField: detail.targetField,
+      mappedValue: detail.value,
+      confidence: detail.confidence,
+      method: 'textract-direct'
+    }))
     
     // Cross-validate critical fields
     const crossValidation = this.performCrossValidation(textractResult, openaiResult, fieldMappings)
@@ -122,8 +142,13 @@ export class FusionEngine {
       businessLogic,
       normalizedData: this.normalizeData(textractResult, openaiResult),
       
-      // Direct field mapping results
-      fieldMappings,
+      // Direct field mapping results  
+      fieldMappings: {
+        mapped: fieldMappings.mapped,
+        unmapped: fieldMappings.unmapped,
+        mappingDetails: fieldMappings.mappingDetails,
+        mappingTrail // Add the detailed mapping trail for UI display
+      },
       
       // Cross-validation
       crossValidation,
@@ -271,16 +296,27 @@ export class FusionEngine {
   }
 
   private extractBusinessLogic(openaiResult: OpenAIResult): any {
+    console.log('🔍 Fusion: Extracting business logic from OpenAI result:', {
+      hasExtractedData: !!openaiResult.extracted_data,
+      extractedDataType: typeof openaiResult.extracted_data,
+      extractedDataKeys: openaiResult.extracted_data ? Object.keys(openaiResult.extracted_data) : [],
+      extractedDataSample: openaiResult.extracted_data
+    })
+    
     // Extract business intelligence from OpenAI result
     if (openaiResult.extracted_data) {
+      // The OpenAI result puts accounting fields directly in extracted_data
+      // Not nested under extracted_data.accounting_fields
       return {
-        // Pass through the accounting fields directly
-        accounting_fields: openaiResult.extracted_data.accounting_fields || {},
+        // Pass through the accounting fields directly - they're the root of extracted_data
+        accounting_fields: openaiResult.extracted_data || {},
         businessRules: openaiResult.extracted_data.business_rules || {},
         interpretations: openaiResult.extracted_data.interpretations || {},
         normalizations: openaiResult.extracted_data.normalizations || {}
       }
     }
+    
+    console.log('⚠️ Fusion: No extracted_data found in OpenAI result, returning empty business logic')
     return { accounting_fields: {} }
   }
 

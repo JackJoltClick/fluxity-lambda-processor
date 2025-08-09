@@ -173,6 +173,8 @@ export function applyFieldMappings(extractedData: Record<string, any>): {
   const unmapped: Record<string, any> = {};
   const mappingDetails: Array<any> = [];
 
+  console.log('🔍 Field Mapping Debug: Input data keys:', Object.keys(extractedData));
+
   // Initialize all fields with null
   FIELD_MAPPINGS.forEach(mapping => {
     mapped[mapping.targetField] = null;
@@ -181,6 +183,7 @@ export function applyFieldMappings(extractedData: Record<string, any>): {
   // Process each extracted key-value pair
   Object.entries(extractedData).forEach(([key, value]) => {
     const mapping = findFieldMapping(key);
+    console.log(`🔍 Field Mapping: "${key}" → ${mapping ? mapping.targetField : 'NO MATCH'}`);
     
     if (mapping) {
       // Apply transformation if needed
@@ -195,12 +198,19 @@ export function applyFieldMappings(extractedData: Record<string, any>): {
           value: transformedValue,
           confidence: 0.95 // High confidence for direct mapping
         });
+        console.log(`✅ Mapped: "${key}" → "${mapping.targetField}" = ${transformedValue}`);
+      } else {
+        console.log(`⚠️ Skipped: "${key}" → "${mapping.targetField}" (already has value: ${mapped[mapping.targetField]})`);
       }
     } else {
       // No mapping found
       unmapped[key] = value;
+      console.log(`❌ Unmapped: "${key}" = ${value}`);
     }
   });
+
+  const mappedCount = Object.values(mapped).filter(v => v !== null).length;
+  console.log(`🎯 Field Mapping Results: ${mappedCount} mapped, ${Object.keys(unmapped).length} unmapped`);
 
   return { mapped, unmapped, mappingDetails };
 }
